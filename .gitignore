@@ -3,3 +3,7 @@
 # virtual env from local machine
 
 /env
+
+# Miscellaneous files folder
+
+/misc
