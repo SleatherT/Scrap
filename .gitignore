@@ -11,3 +11,7 @@
 # Telegram session
 
 /Main.session
+
+# Constant variables, personal info
+
+/config.py

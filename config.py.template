@@ -1,0 +1,2 @@
+# Number that is going to be used to manage the whatsapp instance. It should be in the same format as shown in the app
+w_admin_number = "+00 0000000"
