@@ -37,4 +37,4 @@ async def sendfile():
     await client.send_file('me', filepath)
     
 with client:
-    client.loop.run_until_complete(send_file())
+    client.loop.run_until_complete(sendfile())
