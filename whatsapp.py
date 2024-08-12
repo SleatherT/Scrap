@@ -4,7 +4,10 @@ from utils.print_qr import print_qr
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
+from selenium.common import TimeoutException
+
 import time
+import sys
 
 By = webdriver.common.by.By
 
@@ -36,7 +39,12 @@ browser.execute_script('arguments[0].scrollIntoView(true);', qrdiv)
 
 wait = WebDriverWait(browser, timeout=10, poll_frequency=0.5)
 
-wait.until(lambda browser : type(browser.find_element(by=By.CLASS_NAME, value='_akau').get_attribute('data-ref')) is str )
+try:
+    wait.until(lambda browser : type(browser.find_element(by=By.CLASS_NAME, value='_akau').get_attribute('data-ref')) is str )
+except TimeoutException as e:
+    print(f' TIMEOUT TAKING SCREENSHOT \n {e}')
+    browser.save_screenshot('misc/sceenshotERROR.png')
+    sys.exit(1)
 
 qrelement = browser.find_element(by=By.CLASS_NAME, value='_akau')
 
