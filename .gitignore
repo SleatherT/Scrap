@@ -7,3 +7,7 @@
 # Miscellaneous files folder
 
 /misc
+
+# Telegram session
+
+/Main.session
