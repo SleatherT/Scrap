@@ -1,9 +1,14 @@
+from config import w_admin_number
+from utils.print_qr import print_qr
+
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 import time
 
 By = webdriver.common.by.By
+
+#--------
 
 options = webdriver.EdgeOptions()
 
@@ -37,12 +42,24 @@ qrelement = browser.find_element(by=By.CLASS_NAME, value='_akau')
 
 qrcode = qrelement.get_attribute('data-ref')
 
+#-------
+
 with open('misc/qrstring.txt', 'w') as file:
     file.write(qrcode)
 
 #--------
 
-browser.save_screenshot('misc/screenshot.png')
+browser.save_screenshot('misc/sceenshotQR.png')
+
+#-------- Log in the browser
+
+print_qr(qrcode)
+
+#--------
+
+time.sleep(60)
+
+browser.save_screenshot('misc/sceenshotLAST.png')
 
 #--------
 
