@@ -1,5 +1,8 @@
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.webdriver.support.wait import WebDriverWait
+import time
+
 By = webdriver.common.by.By
 
 options = webdriver.EdgeOptions()
@@ -16,13 +19,21 @@ browser.get('https://web.whatsapp.com')
 
 #--------
 
-browser.implicit_wait(30)
+browser.implicitly_wait(30)
 
 #--------
 
-qrelement = browser.find_element(by=By.CLASS_NAME, value='_akau')
+qrdiv = browser.find_element(by=By.CLASS_NAME, value='_aj-b')
 
-browser.execute_script('arguments[0].scrollIntoView(True);', qrelement)
+browser.execute_script('arguments[0].scrollIntoView(true);', qrdiv)
+
+#-------
+
+wait = WebDriverWait(browser, timeout=10, poll_frequency=0.5)
+
+wait.until(lambda browser : type(browser.find_element(by=By.CLASS_NAME, value='_akau').get_attribute('data-ref')) is str )
+
+qrelement = browser.find_element(by=By.CLASS_NAME, value='_akau')
 
 qrcode = qrelement.get_attribute('data-ref')
 
