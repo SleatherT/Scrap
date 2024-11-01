@@ -1,68 +1,31 @@
-from config import w_admin_number
-from utils.print_qr import print_qr
+import sys
+import time
+import logging
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.common import TimeoutException, StaleElementReferenceException
 
-import time
-import sys
+from config import w_admin_number
+import utils
 
-By = webdriver.common.by.By
-
-#--------
-
-options = webdriver.EdgeOptions()
-
-options.add_argument('--headless=new')
-
-options.add_argument('User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3')
-
-#--------
-
-browser = webdriver.Edge(options=options)
-
-browser.get('https://web.whatsapp.com')
-
-#--------
-
-browser.implicitly_wait(30)
-
-#--------
-
-qrdiv = browser.find_element(by=By.CLASS_NAME, value='_aj-b')
-
-browser.execute_script('arguments[0].scrollIntoView(true);', qrdiv)
-
-#-------
-
-# Defaulted to aprox 10 seconds in waiting to load the data
-def wait_for_dydata(Web_Driver, byLocator, elementID: str, attributeName: str, expectedType, numLoops=20, pollFrequency=0.5):
-    
-    for loop in range(numLoops):
-        attributeData = Web_Driver.find_element(by=byLocator, value=elementID).get_attribute(attributeName)
-        
-        if type(attributeData) is expectedType:
-            return attributeData
-        else:
-            time.sleep(pollFrequency)
-            continue
-    
-    raise Exception(f'Expected type attribute failed, type: {type(attributeData)}, expected type: {expectedType}')
-    
-#-------
+#class whatsapp()
 
 # Loops to check if an element has been dynamically loaded using the data that has changed
 def check_element_changes(element, someAttributeName: str, timeout: int):
-    # Returns True if a change has happened, False if it reached the timeout
+    # Returns True if a change has happened, False if it reached the timeout, a StaleElementReferenceException if encountered (could mean the page changed or the element got relocated)
     pollFrequency = 0.5
     numLoops = int(timeout/pollFrequency)
     dataToCompare = None
     
     dataChanged_flag = False
     for num in range(numLoops):
-        dataCurrent = element.get_attribute(someAttributeName)
+        try:
+            dataCurrent = element.get_attribute(someAttributeName)
+        except StaleElementReferenceException as e:
+            return e
         
         if dataToCompare is None:
             dataToCompare = dataCurrent
@@ -91,40 +54,67 @@ def log_in(timeout: int):
         if timePassed > timeout:
             return False
         
-        qrcode = wait_for_dydata(Web_Driver=browser, byLocator=By.CLASS_NAME, elementID='_akau', attributeName='data-ref', expectedType=str)
+        qrcode = utils.wait_for_dydata(Web_Driver=browser, byLocator=By.CLASS_NAME, elementID='_akau', attributeName='data-ref', expectedType=str)
         
-        print_qr(qrcode)
+        utils.print_qr(qrcode)
         
         with open('misc/qrstring.txt', 'w') as file:
             file.write(qrcode)
         
-        browser.save_screenshot('misc/sceenshotQR.png')
+        browser.save_screenshot('misc/screenshotQR.png')
         
         qrelement = browser.find_element(by=By.CLASS_NAME, value='_akau')
         confirmation = check_element_changes(qrelement, 'data-ref', timeout=60)
         
-        if confirmation:
+        if confirmation is True:
             continue
-        else:
+        elif confirmation is False:
             raise Exception(f'Reached check_element_changes timeout')
+        elif confirmation is StaleElementReferenceException:
+            
+            
 
-# Checks if the log in was successful or not and waits for the new web app to load
 
-confirmation = log_in(timeout=120)
-
-#--------
-
-time.sleep(60)
-
-browser.save_screenshot('misc/sceenshotLAST.png')
-
-#--------
-
-htmlDoc = browser.page_source
-
-soup = BeautifulSoup(htmlDoc, 'html.parser')
-
-with open('misc/sourcepage.txt', 'w') as file:
-    file.write(soup.prettify())
-
-browser.quit()
+if __name__ == '__main__':
+    options = webdriver.EdgeOptions()
+    
+    options.add_argument('--headless=new')
+    
+    options.add_argument('User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3')
+    
+    #--------
+    
+    browser = webdriver.Edge(options=options)
+    
+    browser.get('https://web.whatsapp.com')
+    
+    #--------
+    
+    browser.implicitly_wait(30)
+    
+    #--------
+    
+    qrdiv = browser.find_element(by=By.CLASS_NAME, value='_aj-b')
+    
+    browser.execute_script('arguments[0].scrollIntoView(true);', qrdiv)
+    
+    # Checks if the log in was successful or not and waits for the new web app to load
+    
+    confirmation = log_in(timeout=120)
+    
+    #--------
+    
+    time.sleep(60)
+    
+    browser.save_screenshot('misc/screenshotLAST.png')
+    
+    #--------
+    
+    htmlDoc = browser.page_source
+    
+    soup = BeautifulSoup(htmlDoc, 'html.parser')
+    
+    with open('misc/sourcepage.txt', 'w') as file:
+        file.write(soup.prettify())
+    
+    browser.quit()

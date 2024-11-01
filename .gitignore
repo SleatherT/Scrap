@@ -1,5 +1,11 @@
 # This file indicates what files should be left untracked 
 
+# Python cache
+
+__pycache__
+
+utils/__pycache__
+
 # virtual env from local machine
 
 /env
@@ -15,3 +21,7 @@
 # Constant variables, personal info
 
 /config.py
+
+# Main script logger
+
+runtime.log
