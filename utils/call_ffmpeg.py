@@ -53,7 +53,8 @@ def call_ffmpeg(*, Filepath, maps: list, kwargs: dict, target_format: str):
     input_file = ffmpeg.input(Filepath)
     
     # TODO: There must be a better way of doing this
-    output_path = os.path.abspath(f'{os.path.dirname(os.path.dirname(os.path.abspath('None')))}/misc/{target_format}')
+    repo_path = os.path.dirname(os.path.dirname(os.path.abspath('None')))
+    output_path = os.path.abspath(f'{repo_path}/misc/{target_format}')
     
     video = None
     audio = None

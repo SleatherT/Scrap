@@ -258,7 +258,8 @@ class Telegram_Api():
         filepath = await self.download_file(message)
         
         if target_format.startswith('.'):
-            target_format = f'{os.path.basename(filepath).split('.')[0]} converted{target_format}'
+            extracted_name = os.path.basename(filepath).split('.')[0]
+            target_format = f'{extracted_name} converted{target_format}'
         
         return_code, processed_filepath = utils.call_ffmpeg(Filepath=filepath, maps=ffmpeg_maps, kwargs=ffmpeg_dict, target_format=target_format)
         
