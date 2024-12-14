@@ -249,7 +249,7 @@ class Telegram_Api():
                 stream_i = user_args_itered.__next__()
                 ffmpeg_maps.append(stream_i)
             elif arg.startswith('-'):
-                key = arg.removesuffix('-')
+                key = arg.removeprefix('-')
                 value = user_args_itered.__next__()
                 ffmpeg_dict[key] = value
         
