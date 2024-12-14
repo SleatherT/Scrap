@@ -6,6 +6,7 @@ import sys
 import os
 import signal
 import re
+import time
 import asyncio
 import logging
 import logging.config
@@ -16,8 +17,9 @@ from functools import partial
 # Telegram
 import telethon
 
-# Config variables
+# 
 import config
+import utils
 
 '''
 Before writing the code i will asume some things are true, so if in the future it is show that they aren't, then the code must be changed
@@ -28,14 +30,27 @@ Before writing the code i will asume some things are true, so if in the future i
 
 *With the previous assumptions I conclude that locking the access to the cpu using locks and letting only one thread run a heavy cpu-bound task improves performance
 
-Also, I wanted to override the threading.excephook as the docs say to control how uncaught exceptions are raised in threads, so I can log it, but I dont have the 
+Notes
+
+I wanted to override the threading.excephook as the docs say to control how uncaught exceptions are raised in threads, so I can log it, but I dont have the 
 knowledge to do it, what should I be carefull about? what are the consequences of doing it?.
 
 A note about how threads are treated, since in most systems when the main thread exits other threads ´´are killed without executing try … finally clauses 
 or executing object destructors´´ the ideal way to finish executing the script is always signaling the main thread to do it not killing it, either with a 
 KeyboardInterrupt in Windows/Linux, or calling SIGTERM (kill command) on Linux only one time, and then the main thread signals the other threads to do it 
 so they can exit properly
+
+In howto-logging-cookbook, page 11, its recommended to use a different approach when logging in async code, to avoid blocking the event loop, `` it should 
+be noted that when logging from async code, network and even file handlers could lead to problems `` this seems serious so it should be implemented
+
+When using ffmpeg, I tried to implement a way to raise an error when the command is waiting for input, but i couldn't found a way of achive this, so its
+absolute necessary to avoid this, and if it happens, a timeout is raised using the last output sent to stderr (ffmpeg logs stream) to check if there is 
+no activity, which it can mean that the process is waiting input but there is a lot of reasons why there is no new logs apart from waiting for input so 
+its not an ideal method
+
 '''
+
+global_lock = threadLock = threading.Lock()
 
 logging.config.fileConfig('logging.conf')
 
@@ -53,6 +68,11 @@ class Telegram_Api():
     
     # Only the messages that start with '!' are valid commands, its possible to change it by only modifying this regex
     valid_command_match = re.compile(r'!\w*').match
+    
+    arg_searcher = re.compile(r'\S+').search
+    arg_finditer = re.compile(r'\S+').finditer
+    
+    search_media_format = re.compile(r'\S*[.]\S+').search
     
     # TODO: Since i havent read the documentation about process yet ProcessEvent does nothing right now
     def __init__(self, *, StartedEvent, ThreadEvent=None, ProcessEvent=None):
@@ -87,6 +107,25 @@ class Telegram_Api():
         asyncio.run(self.start_telegram())
     
     async def start_telegram(self):
+        # // Adding a task to periodically check if the thread/process should continue running or should exit
+        
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.confirm_execution())
+        
+        try:
+            await self.connect_to_telegram()
+        except Exception as e:
+            self.logger.exception('Exception when trying to start telegram')
+            if self.STARTED_EVENT:
+                self.STARTED_EVENT.set()
+            
+            return None
+        
+        # // Starting to listen updates
+        
+        await self.t_client.run_until_disconnected()
+    
+    async def connect_to_telegram(self):
         # // Login/Starting
         
         self.t_client = telethon.TelegramClient("Main", self._tel_api_id, self._tel_api_hash)
@@ -95,24 +134,16 @@ class Telegram_Api():
         # // Adding the handler and pattern to the NewMessage event
         
         # Using the id of the administrator chat from the config file
-        telAdminEntity = await self.t_client.get_input_entity(config.t_admin_user)
-        self.telAdminId = telAdminEntity.user_id
+        self.telAdminEntity = await self.t_client.get_input_entity(config.t_admin_user)
+        self.telAdminId = self.telAdminEntity.user_id
         
         self.t_client.add_event_handler(self.process_command, telethon.events.NewMessage(chats=self.telAdminId, pattern=self.check_for_command))
-        
-        # // Adding a task to periodically check if the thread/process should continue running or should exit
-        
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.confirm_execution())
         
         # // If ThreadEvent was passed, it signals that has finished starting
         
         if self.THREAD_EVENT:
             self.logger.debug('About to set STARTED_EVENT to signal wait call in Control_Thread')
             self.STARTED_EVENT.set()
-        
-        # // Starting to listen updates
-        await self.t_client.run_until_disconnected()
         
     def check_for_command(self, string):
         match = self.valid_command_match(string)
@@ -121,24 +152,29 @@ class Telegram_Api():
         if match is None:
             return False
         
-        command = match.group()[1:]
+        command = match.group()[1:] # [1:] removes the '!'
         if command not in self.tel_commands:
             return False
         
         return match
     
     async def process_command(self, event):
+        
         fullString = event.pattern_match.string
-        command = event.pattern_match.group()[1:]
+        command = event.pattern_match.group()[1:] # [1:] removes the '!'
         self.logger.debug(f'Executing command: {command}')
         
         func = self.tel_commands[command]
         
+        #global_lock.acquire()
         try:
             result = await func(self, event)
         except AssertionError as e:
             self.logger.exception(f'Catched AssertionError')
             await event.reply(str(e))
+        finally:
+            #global_lock.release()
+            pass
     
     async def confirm_execution(self):
         while True:
@@ -158,46 +194,126 @@ class Telegram_Api():
         
         await self.t_client.send_file(self.telAdminEntity, filePath)
     
-    async def reduce_video_resolution_doc(self, event):
-        allowed_mime_types = ['video/x-matroska']
+    async def scale(self, event):
+        ''' Scales a video to a lower resolution or the same if its desired to re-encode it slower to (maybe) reduce the file size and an 
+        optional argument to select the video streams
         
+        Usage: !scale <resolution> select_streams
+        
+        Resolution: It must be one of the general used resolutions 1080p, 720p, 480p, 360p... e.g., !scale 360p
+        
+        select_streams: If passed, a message will be sent with the streams of the video to be selected, it must be replied to continue the
+        command
+        
+        '''
+        allowed_mime_types = ['video/x-matroska', 'video/mp4', 'image/jpeg']
+        
+        self.media_converter(event=event, cmd='', mime_types_allowed=allowed_mime_types)
+        
+        
+    async def media_converter(self, event, *, cmd=None, mime_types_allowed=None):
+        ''' A very low-level user command, is used basically by all the commands that work with multimedia, like scale or convert
+        
+        Usage: !media_converter -map a:1 -map s c:a -copy -c:s mov_text -codec:v libx264 -preset slower -x264opts level=31 -filter_complex 
+        [0:v]scale=640:480[out] -map [out] filename.mkv .mp4 ... 
+        The output name, more specifically, the format output is used as the end of the the command, if not found AssertionError is raised
+        If output name only indicates the desired target format and not the name of the output file, e.g. '.mp4' then the same
+        name of the input file is used but adding 'converted' at the end of the file
+        
+        '''
+        
+        message, file = await self.check_file(event)
+        
+        self.logger.debug(f'Mime type passed: {file.mime_type} {file.title}')
+        if mime_types_allowed is not None:
+            assert file.mime_type in mime_types_allowed, 'mime_type not allowed'
+        
+        if not cmd:
+            cmd = event.text
+        
+        user_args = self.arg_finditer(cmd)
+        user_args.__next__() # The first argument / command is not used, is implied that this will always be true
+        
+        user_args_itered = iter([match.group() for match in user_args])
+        
+        self.logger.debug(f'user_args_itered var: {user_args_itered}')
+        
+        target_format = None
+        ffmpeg_maps = list()
+        ffmpeg_dict = dict()
+        for arg in user_args_itered:
+            if self.search_media_format(arg):
+                target_format = arg
+                break
+            elif arg == '-map':
+                stream_i = user_args_itered.__next__()
+                ffmpeg_maps.append(stream_i)
+            elif arg.startswith('-'):
+                key = arg.removesuffix('-')
+                value = user_args_itered.__next__()
+                ffmpeg_dict[key] = value
+        
+        assert target_format is not None, 'Not target format specified'
+        
+        filepath = await self.download_file(message)
+        
+        if target_format.startswith('.'):
+            target_format = f'{os.path.basename(filepath).split('.')[0]} converted{target_format}'
+        
+        return_code, processed_filepath = utils.call_ffmpeg(Filepath=filepath, maps=ffmpeg_maps, kwargs=ffmpeg_dict, target_format=target_format)
+        
+        assert return_code == 0, f'Error executing ffmpeg: code = {return_code}'
+        
+        assert os.path.exists(processed_filepath) is True, 'Error executing ffmpeg command: The file container was not created'
+        
+        await self.t_client.send_file(self.telAdminEntity, processed_filepath)
+    
+    async def check_file(self, event):
+        '''Checks if there is a file in the message or replied message, and returns this message and the file or raises and error if there 
+        is no file
+        
+        '''
         message = event.message
         file = event.file
         
-        if event.file is None:
+        if file is None:
             message = await event.get_reply_message()
-            file = message.file
-            
             assert message is not None, 'No file in the message and no replied message'
-            
+            file = message.file
         
-        assert file is not None, 'Message doesnt contain file'
-        assert file.mime_type in allowed_mime_types, 'mime_type not allowed'
+        assert file is not None, 'Message does not contain file'
         
+        return message, file
+    
+    async def download_file(self, message, *, path='misc/', defaultname=None):
+        '''Returns the path where the file was downloaded
         
-        ''' If is not possible to do something with the .file then this would be used instead, not sure tho
-        attributesDict = {type(attribute):attribute for attribute in file.attributes}
-        assert telethon.tl.types.DocumentAttributeFilename in attributesDict, 'File has no name, ?'
-        filename = attributesDict[telethon.tl.types.DocumentAttributeFilename].file_name
+        The message argument must be a telethon message object. The path must be a string where the file in the script directory will be downloaded, 
+        since os.path.abspath() is used, directory separators can be '/' independently of the executing os, defaults to misc/ if not passed
+        If the file has a name, it will be used, if not, defaultname is used instead, if no defaultname was set then a unique name using the time this
+        function was called will be used as name
+        
         '''
+        file = message.file
+        filename = file.name if file.name is not None else defaultname
+        if filename is None:
+            filename = f'File_{time.monotonic_ns()}'
         
-        assert file.name is not None, 'File has no name, ?'
-        filename = file.name
+        path = os.path.abspath(f'{path}{filename}')
         
         # Copied from the docs
         def callback(current, total):
             self.logger.info(f'Downloaded {current} out of {total} {"bytes: {:.2%}".format(current / total)}')
         
-        path = os.path.abspath(f'misc/downloads/{filename}')
-        
         returned_path = await message.download_media(path, progress_callback=callback)
         
-        self.logger(f'Downloaded file; path passed: {path}, path returned: {returned_path}')
+        self.logger.debug(f'Downloaded file; path passed: {path}, path returned: {returned_path}')
         
-        
+        return returned_path
     
-    # Saving the telegram codes in dict with their coro
-    tel_commands = {'fwscreenshot': forward_screenshot, 'now': reduce_video_resolution_doc}
+    
+    # Saving the telegram codes in a dict with their coro
+    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale}
     
 
 
