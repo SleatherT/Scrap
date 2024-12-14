@@ -57,7 +57,7 @@ def call_ffmpeg(*, Filepath, maps: list, kwargs: dict, target_format: str):
     # this directory which it was not, I didn't know that os.path.abspath returned the path  using the path of the script 
     # file executing
     
-    output_path = os.path.abspath(f'/misc/{target_format}')
+    output_path = os.path.abspath(f'misc/{target_format}')
     
     video = None
     audio = None
