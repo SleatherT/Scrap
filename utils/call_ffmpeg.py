@@ -52,9 +52,12 @@ def call_ffmpeg(*, Filepath, maps: list, kwargs: dict, target_format: str):
     
     input_file = ffmpeg.input(Filepath)
     
-    # TODO: There must be a better way of doing this
-    repo_path = os.path.dirname(os.path.dirname(os.path.abspath('None')))
-    output_path = os.path.abspath(f'{repo_path}/misc/{target_format}')
+    # Before this line was repo_path = os.path.dirname(os.path.dirname(os.path.abspath('None'))) and 
+    # output_path = os.path.abspath(f'{repo_path}/misc/{target_format}') it makes sense, if the main script was executed in
+    # this directory which it was not, I didn't know that os.path.abspath returned the path  using the path of the script 
+    # file executing
+    
+    output_path = os.path.abspath(f'/misc/{target_format}')
     
     video = None
     audio = None
