@@ -206,7 +206,20 @@ class Telegram_Api():
         command
         
         '''
-        allowed_mime_types = ['video/x-matroska', 'video/mp4', 'image/jpeg']
+        valid_resolutions =['480p', '360p']
+        
+        allowed_mime_types = ['video/x-matroska', 'video/mp4']
+        
+        user_args = self.arg_finditer(event.text)
+        user_args.__next__()
+        
+        user_args_itered = iter([match.group() for match in user_args])
+        
+        resolution = None
+        
+        for arg in user_args_itered:
+            pass
+        
         
         self.media_converter(event=event, cmd='', mime_types_allowed=allowed_mime_types)
         
@@ -269,6 +282,13 @@ class Telegram_Api():
         
         await self.t_client.send_file(self.telAdminEntity, processed_filepath)
     
+    async def send_runtime_log(self, event):
+        path_log = os.path.abspath('runtime.log')
+        
+        assert os.path.exists(path_log) is True, 'No logs has been created'
+        
+        await self.t_client.send_file(self.telAdminEntity path_log)
+    
     async def check_file(self, event):
         '''Checks if there is a file in the message or replied message, and returns this message and the file or raises and error if there 
         is no file
@@ -314,7 +334,7 @@ class Telegram_Api():
     
     
     # Saving the telegram codes in a dict with their coro
-    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale}
+    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log}
     
 
 
