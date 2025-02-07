@@ -172,6 +172,9 @@ class Telegram_Api():
         except AssertionError as e:
             self.logger.exception(f'Catched AssertionError')
             await event.reply(str(e))
+        except Exception as e:
+            self.logger.exception(f'Catched Unhandled Error')
+            await event.reply(str(e))
         finally:
             #global_lock.release()
             pass
@@ -287,7 +290,54 @@ class Telegram_Api():
         
         assert os.path.exists(path_log) is True, 'No logs has been created'
         
-        await self.t_client.send_file(self.telAdminEntity path_log)
+        await self.t_client.send_file(self.telAdminEntity, path_log)
+    
+    async def forward_to_chat(self, event):
+        ''' Fowards messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
+        
+        Usage: !fw_chat <link source chat> <link target chat> optional<-min_id:NUMBER>
+        
+        min_id is the id of the message in the chat from where starts to forward, its not ideal but its a patch until find a
+        way to dinamically adjust the wait between forwards to avoid the flood error
+        '''
+        user_args = self.arg_finditer(event.text)
+        user_args.__next__()
+        
+        user_args_text = [match.group() for match in user_args]
+        
+        assert len(user_args_text) >= 2, 'Not enough arguments passed'
+        
+        source_chat = user_args_text[0]
+        target_chat = user_args_text[1]
+        min_id = None
+        
+        if len(user_args_text) >= 3 and user_args_text[2].startswith('-min_id:'):
+            min_id = user_args_text[2].removeprefix('-min_id:')
+            try:
+                min_id = int(min_id)
+            except ValueError:
+                raise AssertionError('min_id is not a number')
+        
+        source_entity = await self.t_client.get_entity(source_chat)
+        
+        target_entity = await self.t_client.get_entity(target_chat)
+        
+        await event.reply('Chats successfully obtained')
+        
+        async for message in self.t_client.iter_messages(source_entity, reverse=True, wait_time=3, min_id=min_id):
+            self.logger.debug(f'Last id obtained: {message.id}')
+            if type(message) is telethon.tl.patched.MessageService:
+                continue
+                
+            await self.t_client.forward_messages(target_entity, message)
+            
+            self.logger.debug(f'Last id forwarded: {message.id}')
+            
+            await asyncio.sleep(3)
+        
+        await event.reply(f'Finished forwarding, last message id forwarded: {message.id}')
+        
+    # ------ No user functions
     
     async def check_file(self, event):
         '''Checks if there is a file in the message or replied message, and returns this message and the file or raises and error if there 
@@ -334,7 +384,7 @@ class Telegram_Api():
     
     
     # Saving the telegram codes in a dict with their coro
-    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log}
+    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log, 'fw_chat': forward_to_chat}
     
 
 
