@@ -104,6 +104,8 @@ class Telegram_Api():
     
     def start(self):
         self.logger = get_logger()
+        self.user_tasks = dict()
+        
         asyncio.run(self.start_telegram())
     
     async def start_telegram(self):
@@ -168,16 +170,21 @@ class Telegram_Api():
         
         #global_lock.acquire()
         try:
-            result = await func(self, event)
+            function = func(self, event)
+            self.user_tasks[command] = function
+            await function
         except AssertionError as e:
             self.logger.exception(f'Catched AssertionError')
             await event.reply(str(e))
+        except asyncio.CancelledError as e:
+            self.logger.exception('Task cancelled')
+            await event.reply('Task cancelled')
         except Exception as e:
             self.logger.exception(f'Catched Unhandled Error')
             await event.reply(str(e))
         finally:
             #global_lock.release()
-            pass
+            del self.user_tasks[command]
     
     async def confirm_execution(self):
         while True:
@@ -196,6 +203,32 @@ class Telegram_Api():
         filePath = os.path.abspath('misc/screenshots/WAscreenshot.png')
         
         await self.t_client.send_file(self.telAdminEntity, filePath)
+    
+    
+    async def get_tasks(self, event):
+        '''Returns the keys of the self.user_tasks variable
+        
+        Usage: !get_tasks
+        
+        '''
+        await event.reply(str(self.user_tasks.keys()))
+    
+    async def cancel_user_task(self, event):
+        ''' Cancel the selected task
+        
+        Usage: !cancel_task <name of the task>
+        
+        '''
+        user_args = self.arg_finditer(event.text)
+        user_args.__next__()
+        
+        user_args_text = [match.group() for match in user_args]
+        
+        assert len(user_args_text) >= 1, 'Not enough arguments passed'
+        assert user_args[0] in self.user_tasks, 'Task name not valid'
+        
+        function = self.user_tasks[user_args[0]]
+        function.cancel()
     
     async def scale(self, event):
         ''' Scales a video to a lower resolution or the same if its desired to re-encode it slower to (maybe) reduce the file size and an 
@@ -295,10 +328,12 @@ class Telegram_Api():
     async def forward_to_chat(self, event):
         ''' Fowards messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
         
-        Usage: !fw_chat <link source chat> <link target chat> optional<-min_id:NUMBER>
+        Usage: !fw_chat <link source chat> <link target chat> |optional <-min_id:NUMBER> | |optional <-keep_alive>|
         
         min_id is the id of the message in the chat from where starts to forward, its not ideal but its a patch until find a
         way to dinamically adjust the wait between forwards to avoid the flood error
+        
+        If keep_alive is passed, new messages will be forwarded
         '''
         user_args = self.arg_finditer(event.text)
         user_args.__next__()
@@ -309,7 +344,8 @@ class Telegram_Api():
         
         source_chat = user_args_text[0]
         target_chat = user_args_text[1]
-        min_id = None
+        min_id = 1
+        keep_alive = False
         
         if len(user_args_text) >= 3 and user_args_text[2].startswith('-min_id:'):
             min_id = user_args_text[2].removeprefix('-min_id:')
@@ -318,25 +354,67 @@ class Telegram_Api():
             except ValueError:
                 raise AssertionError('min_id is not a number')
         
-        source_entity = await self.t_client.get_entity(source_chat)
+        if len(user_args_text) >= 4 and user_args_text[3].startswith('-keep_alive'):
+            keep_alive = True
         
+        source_entity = await self.t_client.get_entity(source_chat)
         target_entity = await self.t_client.get_entity(target_chat)
         
-        await event.reply('Chats successfully obtained')
+        await event.reply(f'Chats successfully obtained. keep_alive: {keep_alive}')
         
-        async for message in self.t_client.iter_messages(source_entity, reverse=True, wait_time=3, min_id=min_id):
+        async for message in self.t_client.iter_messages(source_entity, reverse=True, min_id=min_id):
             self.logger.debug(f'Last id obtained: {message.id}')
             if type(message) is telethon.tl.patched.MessageService:
                 continue
                 
-            await self.t_client.forward_messages(target_entity, message)
-            
+            try:
+                await self.t_client.forward_messages(target_entity, message)
+            except telethon.errors.rpcerrorlist.MessageIdInvalidError as e:
+                self.logger.exception(f'Message that caused error MessageIdInvalidError: {message}')
+                raise AssertionError(f'MessageIdInvalidError raised, check messaje object, id last message: {message.id}')
+                
             self.logger.debug(f'Last id forwarded: {message.id}')
             
             await asyncio.sleep(3)
         
         await event.reply(f'Finished forwarding, last message id forwarded: {message.id}')
         
+        if keep_alive is False:
+            return None
+        
+        @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
+        async def handler(event):
+            await asyncio.sleep(3)
+            await event.forward_to(target_entity)
+        
+    
+    async def permanent_forward(self, event):
+        ''' Fowards new messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
+        
+        Usage: !fw_new_messages <source chat link> <target chat link>
+        
+        '''
+        user_args = self.arg_finditer(event.text)
+        user_args.__next__()
+        
+        user_args_text = [match.group() for match in user_args]
+        
+        assert len(user_args_text) >= 2, 'Not enough arguments passed'
+        
+        source_chat = user_args_text[0]
+        target_chat = user_args_text[1]
+        
+        source_entity = await self.t_client.get_entity(source_chat)
+        target_entity = await self.t_client.get_entity(target_chat)
+        
+        await event.reply(f'Chats successfully obtained')
+        
+        @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
+        async def handler(event):
+            await asyncio.sleep(3)
+            await event.forward_to(target_entity)
+        
+    
     # ------ No user functions
     
     async def check_file(self, event):
@@ -381,10 +459,12 @@ class Telegram_Api():
         self.logger.debug(f'Downloaded file; path passed: {path}, path returned: {returned_path}')
         
         return returned_path
-    
+        
     
     # Saving the telegram codes in a dict with their coro
-    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log, 'fw_chat': forward_to_chat}
+    tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log,
+                    'fw_chat': forward_to_chat, 'get_tasks':get_tasks, 'cancel_task': cancel_user_task, 'fw_new_messages': permanent_forward
+    }
     
 
 
