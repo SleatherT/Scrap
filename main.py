@@ -244,9 +244,9 @@ class Telegram_Api():
             self.logger.debug(f'Cancelling callback: {pair}')
             await event.reply(f'Cancelling callback: {pair}')
         else:
-            assert user_args[1] in self.user_tasks, 'Task name not valid'
+            assert user_args[14:] in self.user_tasks, 'Task name not valid'
             
-            function = self.user_tasks[user_args[0]]
+            function = self.user_tasks[user_args[14:]]
             function.cancel()
     
     async def scale(self, event):
