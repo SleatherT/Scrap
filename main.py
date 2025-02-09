@@ -72,7 +72,12 @@ class Telegram_Api():
     arg_searcher = re.compile(r'\S+').search
     arg_finditer = re.compile(r'\S+').finditer
     
+    findall_arg = re.compile(r'\S+').findall
+    findall_opt_arg = re.compile(r'-\S+').findall
+    
     search_media_format = re.compile(r'\S*[.]\S+').search
+    
+    forward_info = dict()
     
     # TODO: Since i havent read the documentation about process yet ProcessEvent does nothing right now
     def __init__(self, *, StartedEvent, ThreadEvent=None, ProcessEvent=None):
@@ -85,6 +90,9 @@ class Telegram_Api():
         self.STARTED_EVENT = StartedEvent
         self.THREAD_EVENT = ThreadEvent
         self.PROCESS_EVENT = ProcessEvent
+    
+    user_tasks = dict()
+    last_time_forwarded = time.time()
     
     @classmethod
     def get_secrets(cls):
@@ -104,7 +112,6 @@ class Telegram_Api():
     
     def start(self):
         self.logger = get_logger()
-        self.user_tasks = dict()
         
         asyncio.run(self.start_telegram())
     
@@ -171,7 +178,7 @@ class Telegram_Api():
         #global_lock.acquire()
         try:
             function = func(self, event)
-            self.user_tasks[command] = function
+            self.user_tasks[f'{event.text} | {event.id}'] = function
             await function
         except AssertionError as e:
             self.logger.exception(f'Catched AssertionError')
@@ -184,7 +191,8 @@ class Telegram_Api():
             await event.reply(str(e))
         finally:
             #global_lock.release()
-            del self.user_tasks[command]
+            self.logger.debug(f'Deleting key from user_tasks: {event.text} / var: {self.user_tasks}')
+            del self.user_tasks[f'{event.text} | {event.id}']
     
     async def confirm_execution(self):
         while True:
@@ -212,6 +220,7 @@ class Telegram_Api():
         
         '''
         await event.reply(str(self.user_tasks.keys()))
+        await event.reply(str(self.t_client.list_event_handlers()))
     
     async def cancel_user_task(self, event):
         ''' Cancel the selected task
@@ -219,16 +228,26 @@ class Telegram_Api():
         Usage: !cancel_task <name of the task>
         
         '''
-        user_args = self.arg_finditer(event.text)
-        user_args.__next__()
+        user_args = self.findall_arg(event.text)
         
-        user_args_text = [match.group() for match in user_args]
+        assert len(user_args) >= 2, 'Not enough arguments passed'
         
-        assert len(user_args_text) >= 1, 'Not enough arguments passed'
-        assert user_args[0] in self.user_tasks, 'Task name not valid'
+        index_handler = None
+        try:
+            index_handler = int(user_args[1])
+        except ValueError:
+            pass
         
-        function = self.user_tasks[user_args[0]]
-        function.cancel()
+        if type(index_handler) is int:
+            pair = self.t_client.list_event_handlers()[index_handler]
+            self.t_client.remove_event_handler(pair[0])
+            self.logger.debug(f'Cancelling callback: {pair}')
+            await event.reply(f'Cancelling callback: {pair}')
+        else:
+            assert user_args[1] in self.user_tasks, 'Task name not valid'
+            
+            function = self.user_tasks[user_args[0]]
+            function.cancel()
     
     async def scale(self, event):
         ''' Scales a video to a lower resolution or the same if its desired to re-encode it slower to (maybe) reduce the file size and an 
@@ -328,54 +347,61 @@ class Telegram_Api():
     async def forward_to_chat(self, event):
         ''' Fowards messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
         
-        Usage: !fw_chat <link source chat> <link target chat> |optional <-min_id:NUMBER> | |optional <-keep_alive>|
+        Usage: !fw_chat <'link source chat'> <'link target chat'> / optional <-min_id:'NUMBER'> / optional <-keep_alive> 
+                optional <-fw_only:'message property'> e.g. -fw_only:file
         
         min_id is the id of the message in the chat from where starts to forward, its not ideal but its a patch until find a
         way to dinamically adjust the wait between forwards to avoid the flood error
         
         If keep_alive is passed, new messages will be forwarded
+        
         '''
-        user_args = self.arg_finditer(event.text)
-        user_args.__next__()
+        user_args = self.findall_arg(event.text)
         
-        user_args_text = [match.group() for match in user_args]
+        assert len(user_args) >= 3, 'Not enough arguments passed'
         
-        assert len(user_args_text) >= 2, 'Not enough arguments passed'
-        
-        source_chat = user_args_text[0]
-        target_chat = user_args_text[1]
+        source_chat = user_args[1]
+        target_chat = user_args[2]
         min_id = 1
         keep_alive = False
-        
-        if len(user_args_text) >= 3 and user_args_text[2].startswith('-min_id:'):
-            min_id = user_args_text[2].removeprefix('-min_id:')
-            try:
-                min_id = int(min_id)
-            except ValueError:
-                raise AssertionError('min_id is not a number')
-        
-        if len(user_args_text) >= 4 and user_args_text[3].startswith('-keep_alive'):
-            keep_alive = True
+        fw_only = None
         
         source_entity = await self.t_client.get_entity(source_chat)
         target_entity = await self.t_client.get_entity(target_chat)
         
-        await event.reply(f'Chats successfully obtained. keep_alive: {keep_alive}')
+        user_args_opt = self.findall_opt_arg(event.text)
+        
+        for optional in user_args_opt:
+            if optional.startswith('-fw_only:'):
+                fw_only = optional.removeprefix('-fw_only:')
+            elif optional.startswith('-min_id:'):
+                min_id = optional.removeprefix('-min_id:')
+                try:
+                    min_id = int(min_id)
+                except ValueError:
+                    raise AssertionError('min_id is not a number')
+            elif optional.startswith('-keep_alive'):
+                keep_alive = True
+        
+        await event.reply(f'Chats successfully obtained. keep_alive: {keep_alive}, fw_only: {fw_only}, min_id: {min_id}')
         
         async for message in self.t_client.iter_messages(source_entity, reverse=True, min_id=min_id):
-            self.logger.debug(f'Last id obtained: {message.id}')
+            self.logger.debug(f'Last id obtained: {message.id} / {source_entity.title}')
             if type(message) is telethon.tl.patched.MessageService:
                 continue
-                
+            
+            if fw_only is not None:
+                if not getattr(message, fw_only, None):
+                    continue
+            
             try:
-                await self.t_client.forward_messages(target_entity, message)
+                func = self.t_client.forward_messages(target_entity, message)
+                await self.forward_controled(func)
             except telethon.errors.rpcerrorlist.MessageIdInvalidError as e:
                 self.logger.exception(f'Message that caused error MessageIdInvalidError: {message}')
-                raise AssertionError(f'MessageIdInvalidError raised, check messaje object, id last message: {message.id}')
                 
-            self.logger.debug(f'Last id forwarded: {message.id}')
-            
-            await asyncio.sleep(3)
+            self.logger.debug(f'Last id forwarded: {message.id} / {source_entity.title}')
+            self.forward_info[source_entity.title] = message.id
         
         await event.reply(f'Finished forwarding, last message id forwarded: {message.id}')
         
@@ -384,38 +410,100 @@ class Telegram_Api():
         
         @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
         async def handler(event):
-            await asyncio.sleep(3)
-            await event.forward_to(target_entity)
-        
+            if fw_only is not None:
+                if not getattr(event, fw_only, None):
+                    return None
+            
+            func = event.forward_to(target_entity)
+            await self.forward_controled(func)
+            
+            self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
+            self.forward_info[source_entity.title] = event.id
     
     async def permanent_forward(self, event):
         ''' Fowards new messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
         
-        Usage: !fw_new_messages <source chat link> <target chat link>
+        Usage: !fw_new_messages <'source chat link'> <'target chat link'> / optional <-fw_only:'message property'> e.g. -fw_only:file
+        
+        If -fw_only is passed those properties will be checked in the message and if they are they will be forwarded
         
         '''
-        user_args = self.arg_finditer(event.text)
-        user_args.__next__()
+        user_args = self.findall_arg(event.text)
         
-        user_args_text = [match.group() for match in user_args]
+        assert len(user_args) >= 3, 'Not enough arguments passed'
         
-        assert len(user_args_text) >= 2, 'Not enough arguments passed'
-        
-        source_chat = user_args_text[0]
-        target_chat = user_args_text[1]
+        source_chat = user_args[1]
+        target_chat = user_args[2]
         
         source_entity = await self.t_client.get_entity(source_chat)
         target_entity = await self.t_client.get_entity(target_chat)
+        
+        user_args_opt = self.findall_opt_arg(event.text)
+        
+        fw_only = None
+        
+        for optional in user_args_opt:
+            if optional.startswith('-fw_only:'):
+                fw_only = optional.removeprefix('-fw_only:')
         
         await event.reply(f'Chats successfully obtained')
         
         @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
         async def handler(event):
-            await asyncio.sleep(3)
-            await event.forward_to(target_entity)
+            if fw_only is not None:
+                if not getattr(event, fw_only, None):
+                    return None
+            
+            func = event.forward_to(target_entity)
+            await self.forward_controled(func)
+            
+            self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
+            self.forward_info[source_entity.title] = event.id
         
     
+    async def get_forward_info(self, event):
+        ''' Returns the forward_info variable
+        
+        Usage: !fw_info
+        
+        '''
+        await event.reply(str(self.forward_info.items()))
+    
+    
     # ------ No user functions
+    
+    async def forward_controled(self, func):
+        '''Controls the time the forward requests are sent. if a exception is catched, is re-raised
+        
+        Usage: 
+            ´´
+            forward_function = event.forward_to(entity)
+            # or
+            forward_function = self.t_client.forward_messages(target_entity, message)
+            
+            await forward_controled(forward_function)
+            ´´
+        
+        '''
+        try:
+            wait_time = 1.3
+            
+            actual_time = time.time()
+            
+            if self.last_time_forwarded <= actual_time:
+                self.last_time_forwarded = actual_time + wait_time
+            elif self.last_time_forwarded > actual_time:
+                self.last_time_forwarded += wait_time
+            
+            self.logger.debug(f'Time calculated of sleep: {self.last_time_forwarded - actual_time}')
+            
+            await asyncio.sleep(self.last_time_forwarded - actual_time)
+            
+            await func
+        
+        except Exception:
+            raise
+        
     
     async def check_file(self, event):
         '''Checks if there is a file in the message or replied message, and returns this message and the file or raises and error if there 
@@ -463,7 +551,8 @@ class Telegram_Api():
     
     # Saving the telegram codes in a dict with their coro
     tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log,
-                    'fw_chat': forward_to_chat, 'get_tasks':get_tasks, 'cancel_task': cancel_user_task, 'fw_new_messages': permanent_forward
+                    'fw_chat': forward_to_chat, 'get_tasks':get_tasks, 'cancel_task': cancel_user_task, 'fw_new_messages': permanent_forward,
+                    'fw_info': get_forward_info
     }
     
 
