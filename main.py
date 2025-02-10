@@ -66,6 +66,8 @@ def get_logger():
 class Telegram_Api():
     secrets_available = False
     
+    rpcFlooded = {'status': False, 'wait_time': None}
+    
     # Only the messages that start with '!' are valid commands, its possible to change it by only modifying this regex
     valid_command_match = re.compile(r'!\w*').match
     
@@ -77,7 +79,8 @@ class Telegram_Api():
     
     search_media_format = re.compile(r'\S*[.]\S+').search
     
-    forward_info = dict()
+    forward_wait_time = 1
+    forward_info = {'amount_fw_after_time_update': 0, 'fw_time': forward_wait_time}
     
     # TODO: Since i havent read the documentation about process yet ProcessEvent does nothing right now
     def __init__(self, *, StartedEvent, ThreadEvent=None, ProcessEvent=None):
@@ -244,9 +247,9 @@ class Telegram_Api():
             self.logger.debug(f'Cancelling callback: {pair}')
             await event.reply(f'Cancelling callback: {pair}')
         else:
-            assert user_args[14:] in self.user_tasks, 'Task name not valid'
-            
-            function = self.user_tasks[user_args[14:]]
+            # Broken, coroutines dont have cancel method
+            assert event.text[13:] in self.user_tasks, 'Task name not valid'
+            function = self.user_tasks[event.text[13:]]
             function.cancel()
     
     async def scale(self, event):
@@ -395,8 +398,8 @@ class Telegram_Api():
                     continue
             
             try:
-                func = self.t_client.forward_messages(target_entity, message)
-                await self.forward_controled(func)
+                func = self.t_client.forward_messages
+                await self.forward_controled(func, target_entity, message)
             except telethon.errors.rpcerrorlist.MessageIdInvalidError as e:
                 self.logger.exception(f'Message that caused error MessageIdInvalidError: {message}')
                 
@@ -414,8 +417,8 @@ class Telegram_Api():
                 if not getattr(event, fw_only, None):
                     return None
             
-            func = event.forward_to(target_entity)
-            await self.forward_controled(func)
+            func = event.forward_to
+            await self.forward_controled(func, target_entity)
             
             self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
             self.forward_info[source_entity.title] = event.id
@@ -454,8 +457,8 @@ class Telegram_Api():
                 if not getattr(event, fw_only, None):
                     return None
             
-            func = event.forward_to(target_entity)
-            await self.forward_controled(func)
+            func = event.forward_to
+            await self.forward_controled(func, target_entity)
             
             self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
             self.forward_info[source_entity.title] = event.id
@@ -472,7 +475,7 @@ class Telegram_Api():
     
     # ------ No user functions
     
-    async def forward_controled(self, func):
+    async def forward_controled(self, func, *args, **kwargs):
         '''Controls the time the forward requests are sent. if a exception is catched, is re-raised
         
         Usage: 
@@ -486,20 +489,67 @@ class Telegram_Api():
         
         '''
         try:
-            wait_time = 1.3
-            
             actual_time = time.time()
             
             if self.last_time_forwarded <= actual_time:
-                self.last_time_forwarded = actual_time + wait_time
+                self.last_time_forwarded = actual_time + self.forward_wait_time
             elif self.last_time_forwarded > actual_time:
-                self.last_time_forwarded += wait_time
+                self.last_time_forwarded += self.forward_wait_time
             
             self.logger.debug(f'Time calculated of sleep: {self.last_time_forwarded - actual_time}')
             
             await asyncio.sleep(self.last_time_forwarded - actual_time)
             
-            await func
+            await func(*args, **kwargs)
+            
+            self.forward_info['amount_fw_after_time_update'] += 1
+            
+            if self.forward_info['amount_fw_after_time_update'] >= 1000:
+                self.forward_wait_time -= 0.1
+                self.forward_info['amount_fw_after_time_update'] = 0
+        
+        except telethon.errors.rpcerrorlist.FloodWaitError as e:
+            
+            if self.rpcFlooded['status'] is True:
+                await asyncio.sleep(self.rpcFlooded['wait_time'])
+                
+                # Recursive!!
+                await self.forward_controled(func, *args, **kwargs)
+                
+                return None
+            
+            # The first function to execute the following should be also the only one to update the rpcFlooded status to false 
+            # after the wait_time passed, implying this function is not thread-safe
+            
+            letters = self.findall_arg(str(e))
+            wait_sleep = None
+            
+            for letter in letters:
+                try:
+                    wait_sleep = int(letter) + 3
+                except ValueError:
+                    pass
+            
+            if wait_sleep is None:
+                raise e
+            
+            self.logger.debug(f'Catching FloodWaitError and containing it, rpc message: {str(e)}, wait_sleep: {wait_sleep}')
+            
+            self.rpcFlooded['status'] = True
+            self.rpcFlooded['wait_time'] = wait_sleep
+            
+            # 
+            self.forward_wait_time += 0.4
+            
+            await asyncio.sleep(wait_sleep)
+            
+            self.t_client.send_message(self.telAdminEntity, f'FloodWaitError caused by Forward, time asleep: {wait_sleep}')
+            
+            self.rpcFlooded['status'] = False
+            self.rpcFlooded['wait_time'] = None
+            
+            # Recursive!! This shouldn't cause errors or unexpected behavior, I hope
+            await self.forward_controled(func, *args, **kwargs)
         
         except Exception:
             raise
