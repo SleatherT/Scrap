@@ -66,7 +66,10 @@ def get_logger():
 class Telegram_Api():
     secrets_available = False
     
-    rpcFlooded = {'status': False, 'wait_time': None}
+    class countdown_dict(dict, utils.countdown):
+        pass
+        
+    rpcFlooded = countdown_dict(status=False, wait_time=None)
     
     # Only the messages that start with '!' are valid commands, its possible to change it by only modifying this regex
     valid_command_match = re.compile(r'!\w*').match
@@ -209,6 +212,14 @@ class Telegram_Api():
         
         sys.exit()
     
+    async def send_runtime_log(self, event):
+        path_log = os.path.abspath('runtime.log')
+        
+        assert os.path.exists(path_log) is True, 'No logs has been created'
+        
+        await self.t_client.send_file(self.telAdminEntity, path_log)
+    
+    
     async def forward_screenshot(self, event):
         # Is this the correct way to do it?
         filePath = os.path.abspath('misc/screenshots/WAscreenshot.png')
@@ -224,6 +235,7 @@ class Telegram_Api():
         '''
         await event.reply(str(self.user_tasks.keys()))
         await event.reply(str(self.t_client.list_event_handlers()))
+    
     
     async def cancel_user_task(self, event):
         ''' Cancel the selected task
@@ -252,6 +264,7 @@ class Telegram_Api():
             function = self.user_tasks[event.text[13:]]
             function.cancel()
     
+    
     async def scale(self, event):
         ''' Scales a video to a lower resolution or the same if its desired to re-encode it slower to (maybe) reduce the file size and an 
         optional argument to select the video streams
@@ -277,7 +290,6 @@ class Telegram_Api():
         
         for arg in user_args_itered:
             pass
-        
         
         self.media_converter(event=event, cmd='', mime_types_allowed=allowed_mime_types)
         
@@ -340,12 +352,6 @@ class Telegram_Api():
         
         await self.t_client.send_file(self.telAdminEntity, processed_filepath)
     
-    async def send_runtime_log(self, event):
-        path_log = os.path.abspath('runtime.log')
-        
-        assert os.path.exists(path_log) is True, 'No logs has been created'
-        
-        await self.t_client.send_file(self.telAdminEntity, path_log)
     
     async def forward_to_chat(self, event):
         ''' Fowards messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
@@ -379,10 +385,7 @@ class Telegram_Api():
                 fw_only = optional.removeprefix('-fw_only:')
             elif optional.startswith('-min_id:'):
                 min_id = optional.removeprefix('-min_id:')
-                try:
-                    min_id = int(min_id)
-                except ValueError:
-                    raise AssertionError('min_id is not a number')
+                min_id = self.assert_int(min_id, 'min_id')
             elif optional.startswith('-keep_alive'):
                 keep_alive = True
         
@@ -422,6 +425,7 @@ class Telegram_Api():
             
             self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
             self.forward_info[source_entity.title] = event.id
+    
     
     async def permanent_forward(self, event):
         ''' Fowards new messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
@@ -473,19 +477,37 @@ class Telegram_Api():
         await event.reply(str(self.forward_info.items()))
     
     
+    async def update_forward_time(self, event):
+        ''' Updates forward_wait_time variable
+        
+        Usage: !fw_update_time <number>
+        
+        '''
+        user_args = self.findall_arg(event.text)
+        
+        assert len(user_args) >= 2, 'Not enough arguments passed'
+        
+        new_time = self.assert_int(user_args[1], 'New time')
+        
+        self.forward_wait_time = new_time
+    
     # ------ No user functions
     
     async def forward_controled(self, func, *args, **kwargs):
-        '''Controls the time the forward requests are sent. if a exception is catched, is re-raised
+        '''Controls the time the forward requests are sent, if an exception is catched, is re-raised
         
         Usage: 
             ´´
-            forward_function = event.forward_to(entity)
-            # or
-            forward_function = self.t_client.forward_messages(target_entity, message)
+            forward_function = event.forward_to
+            await forward_controled(forward_function, entity)
             
-            await forward_controled(forward_function)
+            # or
+            
+            forward_function = self.t_client.forward_messages
+            await forward_controled(forward_function, target_entity, message)
             ´´
+        
+        Issues: Requests catched by ´if self.rpcFlooded['status'] is True:´ after finishing sleep execute arbitrary so order is lost
         
         '''
         try:
@@ -511,7 +533,9 @@ class Telegram_Api():
         except telethon.errors.rpcerrorlist.FloodWaitError as e:
             
             if self.rpcFlooded['status'] is True:
-                await asyncio.sleep(self.rpcFlooded['wait_time'])
+                time_to_sleep = self.rpcFlooded.get_time_left()
+                self.logger.debug(f'Time to sleep got from rpcFlooded: {time_to_sleep}')
+                await asyncio.sleep(time_to_sleep)
                 
                 # Recursive!!
                 await self.forward_controled(func, *args, **kwargs)
@@ -534,19 +558,17 @@ class Telegram_Api():
                 raise e
             
             self.logger.debug(f'Catching FloodWaitError and containing it, rpc message: {str(e)}, wait_sleep: {wait_sleep}')
+            await self.t_client.send_message(self.telAdminEntity, f'FloodWaitError caused by Forward, time to sleep: {wait_sleep}')
             
             self.rpcFlooded['status'] = True
-            self.rpcFlooded['wait_time'] = wait_sleep
+            self.rpcFlooded.start_countdown(wait_sleep)
             
             # 
             self.forward_wait_time += 0.4
             
             await asyncio.sleep(wait_sleep)
             
-            self.t_client.send_message(self.telAdminEntity, f'FloodWaitError caused by Forward, time asleep: {wait_sleep}')
-            
             self.rpcFlooded['status'] = False
-            self.rpcFlooded['wait_time'] = None
             
             # Recursive!! This shouldn't cause errors or unexpected behavior, I hope
             await self.forward_controled(func, *args, **kwargs)
@@ -571,6 +593,7 @@ class Telegram_Api():
         assert file is not None, 'Message does not contain file'
         
         return message, file
+    
     
     async def download_file(self, message, *, path='misc/', defaultname=None):
         '''Returns the path where the file was downloaded
@@ -599,10 +622,22 @@ class Telegram_Api():
         return returned_path
         
     
+    def assert_int(self, string, var_name='Argument'):
+        ''' Return a integer if the string is a number, if not raises AssertionError with the name of the var that wasn't possible to convert
+        
+        '''
+        try:
+            i = float(string)
+        except ValueError:
+            raise AssertionError(f'{var_name} is not a number')
+        
+        return i
+    
+    
     # Saving the telegram codes in a dict with their coro
     tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log,
                     'fw_chat': forward_to_chat, 'get_tasks':get_tasks, 'cancel_task': cancel_user_task, 'fw_new_messages': permanent_forward,
-                    'fw_info': get_forward_info
+                    'fw_info': get_forward_info, 'fw_update_time': update_forward_time
     }
     
 
