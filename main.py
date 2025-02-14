@@ -83,7 +83,7 @@ class Telegram_Api():
     search_media_format = re.compile(r'\S*[.]\S+').search
     
     forward_wait_time = 1
-    forward_info = {'amount_fw_after_time_update': 0, 'fw_time': forward_wait_time}
+    forward_info = {'amount_fw_after_time_update': 0}
     
     # TODO: Since i havent read the documentation about process yet ProcessEvent does nothing right now
     def __init__(self, *, StartedEvent, ThreadEvent=None, ProcessEvent=None):
@@ -385,7 +385,7 @@ class Telegram_Api():
                 fw_only = optional.removeprefix('-fw_only:')
             elif optional.startswith('-min_id:'):
                 min_id = optional.removeprefix('-min_id:')
-                min_id = self.assert_int(min_id, 'min_id')
+                min_id = self.assert_num(min_id, 'min_id')
             elif optional.startswith('-keep_alive'):
                 keep_alive = True
         
@@ -474,7 +474,7 @@ class Telegram_Api():
         Usage: !fw_info
         
         '''
-        await event.reply(str(self.forward_info.items()))
+        await event.reply(f'{self.forward_info.items()}, Wait time: {self.forward_wait_time}')
     
     
     async def update_forward_time(self, event):
@@ -487,7 +487,7 @@ class Telegram_Api():
         
         assert len(user_args) >= 2, 'Not enough arguments passed'
         
-        new_time = self.assert_int(user_args[1], 'New time')
+        new_time = self.assert_num(user_args[1], 'New time', float)
         
         self.forward_wait_time = new_time
     
@@ -622,12 +622,12 @@ class Telegram_Api():
         return returned_path
         
     
-    def assert_int(self, string, var_name='Argument'):
+    def assert_num(self, string, var_name='Argument', num_class=int):
         ''' Return a integer if the string is a number, if not raises AssertionError with the name of the var that wasn't possible to convert
         
         '''
         try:
-            i = float(string)
+            i = num_class(string)
         except ValueError:
             raise AssertionError(f'{var_name} is not a number')
         
