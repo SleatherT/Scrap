@@ -1,5 +1,24 @@
+# Telegram session files names are a string hashed from the api id and hash, a hashed string is secure but since the lenght 
+# of the id and hash is known, the compute power to deduce it is reduced, to 'salt' the string and recover that hash 
+# resistance a 'password' enviroment variable is used, it can however be omitted setting this variable to False
+ 
+ask_for_password = True
+
 # Number that is going to be used to manage the whatsapp instance. It should be in the same format as shown in the app
+
 w_admin_number = "+00 0000000"
 
-# Telegram username administrator, in this format t_admin_user = 't.me/username'
+
+# Telegram username administrator, in this format ´´´ t_admin_user = 't.me/username' ´´´ it can be also a number but inside 
+# a string in the international format ´´´ t_admin_user = '+00 000000' ´´´ or an user ID in which case is an integer like 
+# ´´´ t_admin_user = 12354654 ´´´
+
 t_admin_user = None
+
+
+# Amount of telegram clients to start and the minimum of clients that must be active to continue executing the script. If
+# set to False the start of Telegram however, it will not use those variables
+
+start_telegram = True
+start_telegram_clients = 1
+min_of_telegram_clients = 1

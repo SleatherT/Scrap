@@ -3,8 +3,10 @@
 
 # Built-in modules
 import sys
+import ast
 import os
 import signal
+import hashlib
 import re
 import time
 import asyncio
@@ -63,13 +65,14 @@ def get_logger():
         
     return logger
 
+
 class Telegram_Api():
-    secrets_available = False
-    
     class countdown_dict(dict, utils.countdown):
         pass
-        
-    rpcFlooded = countdown_dict(status=False, wait_time=None)
+    
+    tel_condition_lock = threading.Condition()
+    
+    last_logged_thread = 0
     
     # Only the messages that start with '!' are valid commands, its possible to change it by only modifying this regex
     valid_command_match = re.compile(r'!\w*').match
@@ -82,44 +85,65 @@ class Telegram_Api():
     
     search_media_format = re.compile(r'\S*[.]\S+').search
     
-    forward_wait_time = 1
-    forward_info = {'amount_fw_after_time_update': 0}
     
     # TODO: Since i havent read the documentation about process yet ProcessEvent does nothing right now
-    def __init__(self, *, StartedEvent, ThreadEvent=None, ProcessEvent=None):
+    def __init__(self, *, ThreadEvent=None, ProcessEvent=None, id_secret_env_name, hash_secret_env_name, thread_log_in_order):
         
         assert ProcessEvent is None, 'ProcessEvent is not implemented right now'
         
         if not isinstance(ThreadEvent, threading.Event):
             raise TypeError('ThreadEvent argument passed to Telegram_Api is not an instance of threading.Event')
             
-        self.STARTED_EVENT = StartedEvent
         self.THREAD_EVENT = ThreadEvent
         self.PROCESS_EVENT = ProcessEvent
-    
-    user_tasks = dict()
-    last_time_forwarded = time.time()
-    
-    @classmethod
-    def get_secrets(cls):
-        logger = get_logger()
-        cls._tel_api_id = os.getenv('ID_TEL')
-        cls._tel_api_hash = os.getenv('HASH_TEL')
         
-        if not cls._tel_api_id or not cls._tel_api_hash:
+        self.id_secret_env_name = id_secret_env_name
+        self.hash_secret_env_name = hash_secret_env_name
+        self.thread_log_in_order = thread_log_in_order
+        
+        self.user_tasks = dict()
+        
+        self.rpcFlooded = self.countdown_dict(status=False, wait_time=None)
+        self.last_time_forwarded = time.time()
+        self.forward_wait_time = 1
+        self.forward_info = {'amount_fw_after_time_update': 0}
+    
+    
+    def get_secrets(self):
+        ''' This function retrieves the API credentials and generates a unique name for the database based on them. 
+        
+        By default, after the initial login, Telegram sessions allow access without requiring the same credentials again,
+        since the session file stores the authorization key. This means that anyone with access to the session file 
+        can use the account, regardless of the original credentials used to create it.
+        
+        To enforce a one-to-one mapping between credentials and session files, this function hashes the API credentials 
+        to create a unique session filename. This approach does not enhance security but ensures that each Telegram 
+        account (or API credential pair) corresponds to a distinct session file, preventing the need to manually delete 
+        previous session files when switching accounts.
+        
+        Credentials issue source: https://github.com/LonamiWebs/Telethon/issues/1569
+        
+        '''
+        logger = get_logger()
+        self._tel_api_id = os.getenv(self.id_secret_env_name)
+        self._tel_api_hash = os.getenv(self.hash_secret_env_name)
+        
+        if not self._tel_api_id or not self._tel_api_hash:
             logger.info('Telegram Api data not provided, telegram client will not start and cross-platform commands will not work')
         else:
             try:
-                cls._tel_api_id = int(cls._tel_api_id)
+                self._tel_api_id = int(self._tel_api_id)
             except ValueError:
                 raise ValueError('Telegram Api ID is not a number')
-            
-            cls.secrets_available = True
+        
+        self.database_name = hashlib.sha256(f"{self._tel_api_id}{self._tel_api_hash}{os.getenv('password')}".encode('utf-8')).hexdigest()
+    
     
     def start(self):
         self.logger = get_logger()
         
         asyncio.run(self.start_telegram())
+    
     
     async def start_telegram(self):
         # // Adding a task to periodically check if the thread/process should continue running or should exit
@@ -128,11 +152,10 @@ class Telegram_Api():
         loop.create_task(self.confirm_execution())
         
         try:
+            self.get_secrets()
             await self.connect_to_telegram()
         except Exception as e:
             self.logger.exception('Exception when trying to start telegram')
-            if self.STARTED_EVENT:
-                self.STARTED_EVENT.set()
             
             return None
         
@@ -140,11 +163,34 @@ class Telegram_Api():
         
         await self.t_client.run_until_disconnected()
     
+    
     async def connect_to_telegram(self):
         # // Login/Starting
         
-        self.t_client = telethon.TelegramClient("Main", self._tel_api_id, self._tel_api_hash)
-        await self.t_client.start()
+        self.t_client = telethon.TelegramClient(f"databases/{self.database_name}", self._tel_api_id, self._tel_api_hash)
+        
+        # Blocking threads until its his turn to log in
+        with self.tel_condition_lock:
+            self.logger.debug(f'Entered condition block num: {self.thread_log_in_order}, self.last_logged_thread: {self.last_logged_thread}, self.thread_log_in_order: {self.thread_log_in_order}')
+            
+            self.tel_condition_lock.wait_for(lambda: self.last_logged_thread + 1 == self.thread_log_in_order)
+            
+            self.logger.info(f'About to log in with the entered credentials number {self.thread_log_in_order}')
+            
+            # Removing the console handler to avoid filling it with outputs while waiting for input
+            utils.handlers_controler.remove_handler_by_type(logging.StreamHandler)
+            
+            await self.t_client.start()
+            
+            # Restoring console handler
+            utils.handlers_controler.restore_removed_handlers()
+        
+            # MUST ADD or it will deadlock the other telegram threads waiting for log in
+            type(self).last_logged_thread += 1
+            
+            self.logger.debug(f'Finishing condition block {self.thread_log_in_order}')
+            
+            self.tel_condition_lock.notify()
         
         # // Adding the handler and pattern to the NewMessage event
         
@@ -154,27 +200,23 @@ class Telegram_Api():
         
         self.t_client.add_event_handler(self.process_command, telethon.events.NewMessage(chats=self.telAdminId, pattern=self.check_for_command))
         
-        # // If ThreadEvent was passed, it signals that has finished starting
-        
-        if self.THREAD_EVENT:
-            self.logger.debug('About to set STARTED_EVENT to signal wait call in Control_Thread')
-            self.STARTED_EVENT.set()
-        
+    
     def check_for_command(self, string):
         match = self.valid_command_match(string)
         
-        self.logger.debug(f'match variable in check_for_command() is: {match}')
+        self.logger.debug(f'Match variable in check_for_command() is: {match}')
         if match is None:
             return False
         
         command = match.group()[1:] # [1:] removes the '!'
+        
         if command not in self.tel_commands:
             return False
         
         return match
     
+    
     async def process_command(self, event):
-        
         fullString = event.pattern_match.string
         command = event.pattern_match.group()[1:] # [1:] removes the '!'
         self.logger.debug(f'Executing command: {command}')
@@ -200,6 +242,7 @@ class Telegram_Api():
             self.logger.debug(f'Deleting key from user_tasks: {event.text} / var: {self.user_tasks}')
             del self.user_tasks[f'{event.text} | {event.id}']
     
+    
     async def confirm_execution(self):
         while True:
             await asyncio.sleep(30)
@@ -211,6 +254,7 @@ class Telegram_Api():
                 break
         
         sys.exit()
+    
     
     async def send_runtime_log(self, event):
         path_log = os.path.abspath('runtime.log')
@@ -225,6 +269,36 @@ class Telegram_Api():
         filePath = os.path.abspath('misc/screenshots/WAscreenshot.png')
         
         await self.t_client.send_file(self.telAdminEntity, filePath)
+    
+    
+    async def last_id_entities_interacted(self, event):
+        ''' Forwards the last ids of the user, channels or groups where the user sent a message
+        
+        Usage: !get_last_ids <-dialogs:int> <-messages:int>
+        
+        dialogs its the amount of recent chats to check, defauts to 30. messages indicates the same, it will check those
+        recent messages in the chat, defaults to 100
+        
+        '''
+        
+        user_args_opt = self.findall_opt_arg(event.text)
+        
+        dialogs_limit = 30
+        messages_limit = 100
+        for opt in user_args_opt:
+            if opt.startswith('-dialogs:'):
+                dialogs_limit = self.assert_num(opt.removeprefix('-dialogs:'))
+            elif opt.startswith('-messages:'):
+                messages_limit = self.assert_num(opt.removeprefix('-messages:'))
+        
+        interacted_chats = list()
+        async for dialog in self.t_client.iter_dialogs(dialogs_limit):
+            async for message in self.t_client.iter_messages(dialog.entity, messages_limit):
+                if message.sender_id == self.telAdminId:
+                    interacted_chats.append(dialog.id)
+                    break
+        
+        await self.t_client.send_message(self.telAdminEntity, f'Last entities interacted: {interacted_chats}')
     
     
     async def get_tasks(self, event):
@@ -356,7 +430,7 @@ class Telegram_Api():
     async def forward_to_chat(self, event):
         ''' Fowards messages from a chat/channel to another selected chat. The self-bot/client must be in the chat to forward
         
-        Usage: !fw_chat <'link source chat'> <'link target chat'> / optional <-min_id:'NUMBER'> / optional <-keep_alive> 
+        Usage: !fw_chat <'link source chat'> <'link target chat'> / optional <-min_id:'NUMBER'> / opt <-keep_alive> / opt <-kwargs:'STRING'>
                 optional <-fw_only:'message property'> e.g. -fw_only:file
         
         min_id is the id of the message in the chat from where starts to forward, its not ideal but its a patch until find a
@@ -364,16 +438,27 @@ class Telegram_Api():
         
         If keep_alive is passed, new messages will be forwarded
         
+        If kwargs passed must be a string in the form of a python dict to be evaluated by ast.literal_eval
+        
         '''
         user_args = self.findall_arg(event.text)
         
         assert len(user_args) >= 3, 'Not enough arguments passed'
         
-        source_chat = user_args[1]
-        target_chat = user_args[2]
+        try:
+            source_chat = self.assert_num(user_args[1])
+        except AssertionError:
+            source_chat = user_args[1]
+        
+        try:
+            target_chat = self.assert_num(user_args[2])
+        except AssertionError:
+            target_chat = user_args[2]
+        
         min_id = 1
         keep_alive = False
         fw_only = None
+        kwargs = dict()
         
         source_entity = await self.t_client.get_entity(source_chat)
         target_entity = await self.t_client.get_entity(target_chat)
@@ -385,14 +470,21 @@ class Telegram_Api():
                 fw_only = optional.removeprefix('-fw_only:')
             elif optional.startswith('-min_id:'):
                 min_id = optional.removeprefix('-min_id:')
-                min_id = self.assert_num(min_id, 'min_id')
+                min_id = self.assert_num(min_id, var_name='min_id')
             elif optional.startswith('-keep_alive'):
                 keep_alive = True
+            elif optional.startswith('-kwargs:'):
+                kwargs = ast.literal_eval(optional.removeprefix('-kwargs:'))
+                assert type(kwargs) is dict, 'kwargs is not a dictionary'
         
         await event.reply(f'Chats successfully obtained. keep_alive: {keep_alive}, fw_only: {fw_only}, min_id: {min_id}')
         
-        async for message in self.t_client.iter_messages(source_entity, reverse=True, min_id=min_id):
-            self.logger.debug(f'Last id obtained: {message.id} / {source_entity.title}')
+        async for message in self.t_client.iter_messages(source_entity, reverse=True, min_id=min_id, **kwargs):
+            # A variable to be used only by the logger
+            debug_name = source_entity.id if type(source_entity) == telethon.tl.types.User else source_entity.title
+            
+            self.logger.debug(f'Last id obtained: {message.id} / {debug_name}')
+            
             if type(message) is telethon.tl.patched.MessageService:
                 continue
             
@@ -406,8 +498,9 @@ class Telegram_Api():
             except telethon.errors.rpcerrorlist.MessageIdInvalidError as e:
                 self.logger.exception(f'Message that caused error MessageIdInvalidError: {message}')
                 
-            self.logger.debug(f'Last id forwarded: {message.id} / {source_entity.title}')
-            self.forward_info[source_entity.title] = message.id
+            self.logger.debug(f'Last id forwarded: {message.id} / {debug_name}')
+            
+            self.forward_info[debug_name] = message.id
         
         await event.reply(f'Finished forwarding, last message id forwarded: {message.id}')
         
@@ -416,6 +509,8 @@ class Telegram_Api():
         
         @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
         async def handler(event):
+            debug_name = source_entity.id if type(source_entity) == telethon.tl.types.User else source_entity.title
+            
             if fw_only is not None:
                 if not getattr(event, fw_only, None):
                     return None
@@ -423,8 +518,8 @@ class Telegram_Api():
             func = event.forward_to
             await self.forward_controled(func, target_entity)
             
-            self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
-            self.forward_info[source_entity.title] = event.id
+            self.logger.debug(f'Last id forwarded: {event.id} / {debug_name}')
+            self.forward_info[debug_name] = event.id
     
     
     async def permanent_forward(self, event):
@@ -457,6 +552,8 @@ class Telegram_Api():
         
         @self.t_client.on(telethon.events.NewMessage(chats=source_entity))
         async def handler(event):
+            debug_name = source_entity.id if type(source_entity) == telethon.tl.types.User else source_entity.title
+            
             if fw_only is not None:
                 if not getattr(event, fw_only, None):
                     return None
@@ -464,8 +561,8 @@ class Telegram_Api():
             func = event.forward_to
             await self.forward_controled(func, target_entity)
             
-            self.logger.debug(f'Last id forwarded: {event.id} / {source_entity.title}')
-            self.forward_info[source_entity.title] = event.id
+            self.logger.debug(f'Last id forwarded: {event.id} / {debug_name}')
+            self.forward_info[debug_name] = event.id
         
     
     async def get_forward_info(self, event):
@@ -487,7 +584,7 @@ class Telegram_Api():
         
         assert len(user_args) >= 2, 'Not enough arguments passed'
         
-        new_time = self.assert_num(user_args[1], 'New time', float)
+        new_time = self.assert_num(user_args[1], var_name='New time', num_class=float)
         
         self.forward_wait_time = new_time
     
@@ -622,7 +719,7 @@ class Telegram_Api():
         return returned_path
         
     
-    def assert_num(self, string, var_name='Argument', num_class=int):
+    def assert_num(self, string, *, var_name='Argument', num_class=int):
         ''' Return a integer if the string is a number, if not raises AssertionError with the name of the var that wasn't possible to convert
         
         '''
@@ -637,7 +734,7 @@ class Telegram_Api():
     # Saving the telegram codes in a dict with their coro
     tel_commands = {'fwscreenshot': forward_screenshot, 'media_converter': media_converter, 'scale': scale, 'runtime_log': send_runtime_log,
                     'fw_chat': forward_to_chat, 'get_tasks':get_tasks, 'cancel_task': cancel_user_task, 'fw_new_messages': permanent_forward,
-                    'fw_info': get_forward_info, 'fw_update_time': update_forward_time
+                    'fw_info': get_forward_info, 'fw_update_time': update_forward_time, 'get_last_ids': last_id_entities_interacted
     }
     
 
@@ -649,25 +746,35 @@ class Telegram_Api():
 class Control_Thread():
     keepAliveEvents = dict()
     
-    telegram_event = threading.Event()
-    keepAliveEvents['telegram'] = telegram_event
+    telegramDefaultThreadName = 'telegram'
+    whatsappDefaultThreadName = 'whatsapp'
     
-    whatsapp_event = threading.Event()
-    keepAliveEvents['whatsapp'] = whatsapp_event
+    telegram_env_secret_default_name_ID = 'ID_TEL'
+    telegram_env_secret_default_name_HASH = 'HASH_TEL'
     
-    # INFO: Setting to True the events, they are allowed to run, this is only to made the code intuitive
-    for event in keepAliveEvents.values():
-        event.set()
     
-    def __init__(self, start_telegram=False, start_whatsapp=False, 
-                 exit_if_telegram_ends=True, 
-                 exit_if_whatsapp_ends=True):
+    def __init__(self, start_telegram=False, start_whatsapp=False, min_of_telegram_clients=1, min_of_whatsapp_clients=1,
+                 quantity_of_telegram_clients=1, quantity_of_whatsapp_clients=1):
+        ''' If set to false the start of an api, the other arguments related are not used, they are overridden to 0.
         
+        Minimum of clients arguments (e.g. min_of_whatsapp_clients) specify the minimum amount of threads/clients of that 
+        app that must be active, if not, all threads are exited and the program ends.
+        
+        Quantity of clients (e.g. quantity_of_telegram_clients) specify the amount of apis of an app the control thread must
+        created, since enviromental variables are used at the momment for telegram, the telegram_env_secret_default_name_ID
+        is used for the first thread/client and for the next client it will use the same name but adding '_' and the number
+        so it would end up looking like this 'ID_TEL_2', that is the example of how the enviromental variable should be set
+        for the second telegram client
+        
+        '''
         self.start_telegram = start_telegram
         self.start_whatsapp = start_whatsapp
         
-        self.exit_if_telegram_ends = exit_if_telegram_ends
-        self.exit_if_whatsapp_ends = exit_if_whatsapp_ends
+        self.min_of_telegram_clients = min_of_telegram_clients if start_telegram else 0
+        self.quantity_of_telegram_clients = quantity_of_telegram_clients if start_telegram else 0
+        
+        self.min_of_whatsapp_clients = min_of_whatsapp_clients if start_whatsapp else 0
+        self.quantity_of_whatsapp_clients = quantity_of_whatsapp_clients if start_whatsapp else 0
     
     
     def start_control_thread(self, handler):
@@ -678,27 +785,38 @@ class Control_Thread():
             self.logger.exception('Exception found when running start_threads, calling handler to exit started threads')
             handler()
     
+    
     def start_threads(self):
-        telegramThreadName = 'telegram'
         threads = list()
         
+        # NOTE: Threads are started, if they failed to start by any cause, the control thread will continue executing the 
+        # other threads or terminate them depending of the aguments passed at the creation of the control thread
         if self.start_telegram:
-            Telegram_Api.get_secrets()
-        
-        # NOTE: First it should start the API's and their threads, one at a time
-        if self.start_telegram and Telegram_Api.secrets_available:
-            telegram_event = self.keepAliveEvents['telegram']
-            telegram_started_event = threading.Event()
-            telegram_api = Telegram_Api(StartedEvent=telegram_started_event, ThreadEvent=telegram_event)
-            telegram_thread = threading.Thread(target=telegram_api.start, name=telegramThreadName)
-            
-            telegram_thread.start()
-            
-            self.logger.debug('About to call telegram_started_event.wait')
-            telegram_started_event.wait()
-            self.logger.debug('Finished telegram_started_event.wait')
-            
-            threads.append(telegram_thread)
+            for n in range(1, self.quantity_of_telegram_clients + 1):
+                if n > 1:
+                    telegramThreadName = f'{self.telegramDefaultThreadName}_{n}'
+                    telegram_env_secret_name_ID = f'{self.telegram_env_secret_default_name_ID}_{n}'
+                    telegram_env_secret_name_HASH = f'{self.telegram_env_secret_default_name_HASH}_{n}'
+                else:
+                    telegramThreadName = self.telegramDefaultThreadName
+                    telegram_env_secret_name_ID = self.telegram_env_secret_default_name_ID
+                    telegram_env_secret_name_HASH = self.telegram_env_secret_default_name_HASH
+                
+                telegram_event = threading.Event()
+                
+                # Setting to True the Events = They are allowed to run
+                telegram_event.set()
+                
+                
+                self.keepAliveEvents[telegramThreadName] = telegram_event
+                telegram_api = Telegram_Api(ThreadEvent=telegram_event, id_secret_env_name=telegram_env_secret_name_ID,
+                                            hash_secret_env_name=telegram_env_secret_name_HASH, thread_log_in_order=n)
+                
+                telegram_thread = threading.Thread(target=telegram_api.start, name=telegramThreadName)
+                
+                telegram_thread.start()
+                
+                threads.append(telegram_thread)
         
         if self.start_whatsapp:
             pass
@@ -720,13 +838,15 @@ class Control_Thread():
             if not thread_name:
                 break
             
-            if self.exit_if_telegram_ends and thread_name == 'telegram':
-                break
-            
-            if self.exit_if_whatsapp_ends and thread_name == 'whatsapp':
-                break
-            
             del thread_futures[future]
+            
+            active_clients = self.check_clients_active(thread_futures.values())
+            
+            if active_clients[self.telegramDefaultThreadName] < self.min_of_telegram_clients:
+                break
+            
+            if active_clients[self.whatsappDefaultThreadName] < self.min_of_whatsapp_clients:
+                break
             
             if len(thread_futures) == 0:
                 break
@@ -739,7 +859,21 @@ class Control_Thread():
         
         self.executor.shutdown()
         
-    
+    def check_clients_active(self, threads_list):
+        clients_dict = dict()
+        clients_dict[self.telegramDefaultThreadName] = 0
+        clients_dict[self.whatsappDefaultThreadName] = 0
+        
+        for thread_name in threads_list:
+            if thread_name.startswith(self.telegramDefaultThreadName):
+                clients_dict[self.telegramDefaultThreadName] = clients_dict[self.telegramDefaultThreadName] + 1
+            elif thread_name.startswith(self.whatsappDefaultThreadName):
+                clients_dict[self.whatsappDefaultThreadName] = clients_dict[self.whatsappDefaultThreadName] + 1
+        
+        self.logger.info(f'clients_dict var: {clients_dict}')
+        
+        return clients_dict
+
 def signal_handler(signum=None, frame=None, *, control_thread_obj):
     logger = get_logger()
     
@@ -754,7 +888,6 @@ def signal_handler(signum=None, frame=None, *, control_thread_obj):
             event.clear()
     
     if hasattr(control_thread_obj, 'executor'):
-        logger.debug('Confirmed that control_thread has executor attribute' )
         logger.info('About to call executor.shutdown')
         control_thread_obj.executor.shutdown()
         logger.info('Finished shutting down executor')
@@ -766,35 +899,48 @@ def signal_handler(signum=None, frame=None, *, control_thread_obj):
 if __name__ == '__main__':
     # Storing the main thread references in a local data so it doesnt spread to other threads (added because I found that I may call 
     # logger instead self.logger and nothing would alert me)
-    mydata = threading.local()
+    MainThreadVars = threading.local()
     
-    mydata.logger = get_logger()
+    MainThreadVars.logger = get_logger()
     
-    mydata.control_thread_obj = Control_Thread(start_telegram=True)
+    # // Notifying that a 'password' enviroment variable is going to be used to enhance the security of hashed strings like
+    # the name for the telegram session files
+    if os.getenv('password'):
+        MainThreadVars.logger.warning('''Using a "password" enviroment variable to enhance session filenames. If you haven't set this variable for this, stop the script and change it''')
+        time.sleep(5)
+    else:
+        MainThreadVars.logger.critical('Not found "password" enviroment variable, to enhance session filenames please add it before log into accounts')
+        if config.ask_for_password:
+            sys.exit()
     
-    mydata.handler = partial(signal_handler, control_thread_obj=mydata.control_thread_obj)
+    MainThreadVars.control_thread_obj = Control_Thread(start_telegram=True, 
+        quantity_of_telegram_clients=config.start_telegram_clients,
+        min_of_telegram_clients=config.minimum_of_telegram_clients
+    )
     
-    signal.signal(2, mydata.handler)
-    signal.signal(15, mydata.handler)
+    MainThreadVars.handler = partial(signal_handler, control_thread_obj=MainThreadVars.control_thread_obj)
     
-    mydata.control_thread = threading.Thread(target=mydata.control_thread_obj.start_control_thread, 
-                                             args=[mydata.handler], name='Control_Thread')
-    mydata.control_thread.start()
+    signal.signal(2, MainThreadVars.handler)
+    signal.signal(15, MainThreadVars.handler)
+    
+    MainThreadVars.control_thread = threading.Thread(target=MainThreadVars.control_thread_obj.start_control_thread, 
+                                                     args=[MainThreadVars.handler], name='Control_Thread')
+    MainThreadVars.control_thread.start()
     
     # FIX: An awfull, terrible, painfull, abominable, constrained but even worse, bloated code, I didn't found another way of keeping 
     # the main thread active to be able to receive signals without looping on windows, on linux, macOS and other os, locks can receive 
     # POSIX signals so it will be added in the near future
     if sys.platform in ['win32', 'linux', 'darwin']:
-        mydata.logger.debug('Starting loop to receive signals')
+        MainThreadVars.logger.debug('Starting loop to receive signals')
         while True:
             # INFO: A timeout of 5 seconds, if a signal was sent it will take a max of those seconds to call the handler
-            mydata.control_thread.join(timeout=5.0)
+            MainThreadVars.control_thread.join(timeout=5.0)
             
-            if not mydata.control_thread.is_alive():
+            if not MainThreadVars.control_thread.is_alive():
                 break
-            mydata.logger.debug('Looped')
-        mydata.logger.info('Finishing up main thread, signals will not be processed after this point')
+            MainThreadVars.logger.debug('Looped')
+        MainThreadVars.logger.info('Finishing up main thread, signals will not be processed after this point')
         
     else:
-        mydata.logger.critical('OS doesnt have a way to keep the main thread alive, add a personalized way or use the win32 method')
-        mydata.handler()
+        MainThreadVars.logger.critical('OS doesnt have a way to keep the main thread alive, add a personalized way or use the win32 method')
+        MainThreadVars.handler()
